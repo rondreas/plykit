@@ -12,6 +12,22 @@
         extra/scripts/lxserv/stl_loader.py
 
 
+    This is the structure of a typical PLY file:
+
+        - Header
+        - Vertex List
+        - Face List 
+        - (lists of other elements)
+
+    The header is a series of carraige-return terminated lines of text that 
+    describe the remainder of the file. The header includes a description of 
+    each element type, including the element's name (e.g. "edge"), how many
+    such elements are in the object, and a list of the various properties
+    associated with the element. The header also tells whether the file is
+    binary or ASCII. Following the header is one list of elements for each
+    element type, presented in the order described in the header.
+
+
 """
 
 
@@ -24,8 +40,8 @@ import lxu
 
 
 # Dictionary to map ply property types to struct types
-property_types = {
-    "char": "c",
+binary_property_types = {
+    "char": "b",
     "uchar": "B",
     "short": "h",
     "ushort": "H",
@@ -33,6 +49,17 @@ property_types = {
     "uint": "I",
     "float": "f",
     "double": "d",
+}
+
+ascii_property_types = {
+    "char": int,
+    "uchar": int,
+    "short": int,
+    "ushort": int,
+    "int": int,
+    "uint": int,
+    "float": float,
+    "double": float,
 }
 
 
@@ -67,22 +94,86 @@ class PLYLoader(lxifc.Loader):
         pass
 
     def load_LoadObject(self, loadInfo, monitor, dest):
-        print("load_LoadObject")
+        """ 
+
+        :param loadInfo:
+        :param monitor:
+        :param dest:
+
+        """
+
+        # Set position of file at end of header,
+        self.filehandle.seek(self.end_header)
+
+        vertices = []
+        faces = []
+
+        if self.format == "ascii":
+            for element in self.elements:
+                if element.get('name') == "vertex":
+                    # For this element, read expected types to list
+                    types = []
+                    for prop in element.get("properties"):
+                        types.append(ascii_property_types.get(prop.get('type')))
+
+                    # Each element is expected to be stored on one line, parse each
+                    # line with expected property types.
+                    for _ in range(element.get('count', 0)):
+                        data = tuple(t(value) for t, value in zip(types, self.filehandle.readline().strip().split()))
+                        vertices.append(data[:3]) # push the first three types, assuming here they are position xyz
+
+                elif element.get('name') == "face":
+                    for _ in range(element.get('count', 0)):
+                        data = self.filehandle.readline().strip().split()
+                        faces.append(tuple(int(d) for d in data[1:]))
+        
+        elif self.format == "binary_big_endian":
+            pass
+
+        elif self.format == "binary_little_endian":
+            pass
+
+        else:
+            pass
+
         scene = lx.object.Scene(dest)
-        print("made a scene")
+
         item = scene.ItemAdd(
             self.scene_service.ItemTypeLookup(lx.symbol.sITYPE_MESH))
-        print("added item")
+
         chan_write = scene.Channels(lx.symbol.s_ACTIONLAYER_SETUP, 0.0)
         chan_write = lx.object.ChannelWrite(chan_write)
-        print("wrote to channel")
-        mesh_loc = chan_write.ValueObj(
+
+        mesh = chan_write.ValueObj(
                 item, item.ChannelLookup(lx.symbol.sICHAN_MESH_MESH))
-        mesh_loc = lx.object.Mesh(mesh_loc)
-        if not mesh_loc.test():
-            print("Mesh failed test")
+        mesh = lx.object.Mesh(mesh)
+        if not mesh.test():
             lx.throw(lx.result.FALSE)
-        mesh_loc.SetMeshEdits(lx.symbol.f_MESHEDIT_POLYGONS)
+
+        point = mesh.PointAccessor()
+        polygon = mesh.PolygonAccessor()
+        if not point.test() and not polygon.test():
+            lx.throw(lx.result.FALSE)
+
+        # vertex should be a tuple for position,
+        points = {}
+        for index, position in enumerate(vertices):
+            points[index] = point.New(position)
+
+        for face in faces:
+            vertIds = tuple(points[i] for i in face)
+            storage = lx.object.storage('p', len(vertIds))
+            for index, _id in enumerate(vertIds):
+                storage[index] = _id
+            polygon.New(lx.symbol.iPTYP_FACE, storage, len(vertIds), 0)
+
+        # Add comments from header to the item
+        if self.comments:
+            tag = lx.object.StringTag(item)
+            tag.Set(lx.symbol.iTAG_COMMENT, "\n".join(self.comments))
+
+        mesh.SetMeshEdits(lx.symbol.f_MESHEDIT_POLYGONS)
+
         return lx.result.OK
 
     def load_Recognize(self, filename, loadInfo):
@@ -129,12 +220,12 @@ class PLYLoader(lxifc.Loader):
 
             # Check for comments and read to a list.
             if line.startswith(b"comment"):
-                self.comments.append(line[8:])
+                self.comments.append(str(line[8:].decode('ascii')))
 
             # Parse elements,
             elif line.startswith(b"element"):
                 _, name, count = line.split()
-                element = {"name": name, "count": count, "properties": []}
+                element = {"name": name, "count": int(count), "properties": []}
                 self.elements.append(element)
 
             # Parse properties for elements,
@@ -156,26 +247,15 @@ class PLYLoader(lxifc.Loader):
                 lx.throw(lx.result.NOTFOUND)
 
         self.end_header = self.filehandle.tell()
-        print("parsed headers")
 
         info = lx.object.LoaderInfo(loadInfo)
         info.SetClass(lx.symbol.u_SCENE)
-        print("set up info")
 
         self.load_target = lx.object.SceneLoaderTarget()
         self.load_target.set(loadInfo)
         self.load_target.SetRootType(lx.symbol.sITYPE_MESH)
-        print("set load target")
 
         return lx.result.OK  # Tell Modo we've recognized the file.
-
-    def parse_ascii(self):
-        """ Read the data from the file. """
-        pass
-
-    def parse_binary(self):
-        """ Read the binary data from the file. """
-        pass
 
 
 tags = {
