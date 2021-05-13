@@ -102,6 +102,8 @@ class PLYLoader(lxifc.Loader):
 
         """
 
+        _monitor = lx.object.Monitor(monitor)
+
         # Set position of file at end of header,
         self.filehandle.seek(self.end_header)
 
@@ -128,7 +130,67 @@ class PLYLoader(lxifc.Loader):
                         faces.append(tuple(int(d) for d in data[1:]))
         
         elif self.format == "binary_big_endian":
-            pass
+            chunk_size = 1024
+            for element in self.elements:
+                if element.get('name') == "vertex":
+                    fmt = '>'
+                    for prop in element.get("properties"):
+                        fmt += binary_property_types.get(prop.get('type'))
+
+                    size = struct.calcsize(fmt) # each vertex have this size
+                    total_size = size * element.get('count', 0) # the total byte size for all vertices
+
+                    read_size = chunk_size - (chunk_size % size) # byte size we will read to get full set of vertices
+
+                    num_reads = total_size // read_size # the number of reads we will have to make
+                    num_verts = read_size // size # number of verts will be read 
+                    overflow = total_size % read_size # how many bytes are left after reading all full segments
+
+                    _monitor.Initialize(num_reads + 1 if overflow else num_reads)
+
+                    for _ in range(num_reads):
+                        data = self.filehandle.read(read_size)
+                        for x in range(num_verts):
+                            vertex = struct.unpack_from(fmt, data, offset=x*size)
+                            vertices.append(vertex)
+                            _monitor.Increment(1)
+
+                    data = self.filehandle.read(overflow)
+                    for x in range(overflow // size):
+                        vertex = struct.unpack_from(fmt, data, offset=x*size)
+                        vertices.append(vertex)
+                        _monitor.Increment(1)
+
+                elif element.get('name') == "face":
+                    face_count = element.get('count', 0)
+                    _monitor.Initialize(face_count)
+                    for _ in range(face_count):
+                        # With potentially variable length of list properties,
+                        # I think I might have to make this many reads :(
+
+                        pos = self.filehandle.tell()
+
+                        # First read how many indices we can expect, should be int/uchar so always single digit
+                        fmt = '>' + binary_property_types.get(element['properties'][0]['size'])
+                        size = struct.calcsize(fmt)
+                        data = self.filehandle.read(size)
+                        num_indices, = struct.unpack(fmt, data)
+
+                        # Then read the indices
+                        t = binary_property_types.get(element['properties'][0]['type'])
+                        fmt = '>' + str(num_indices) + t
+                        size = struct.calcsize(fmt)
+                        data = self.filehandle.read(size)
+                        try:
+                            indices = struct.unpack(fmt, data)
+                            faces.append(indices)
+                        except struct.error as e:
+                            print(e)
+                            print("Failed reading {} bytes for format {}".format(size, fmt))
+                            print("Failed @ {}".format(pos))
+                            raise(e)
+
+                        _monitor.Increment(1)
 
         elif self.format == "binary_little_endian":
             pass
@@ -157,15 +219,19 @@ class PLYLoader(lxifc.Loader):
 
         # vertex should be a tuple for position,
         points = {}
+        _monitor.Initialize(len(vertices))
         for index, position in enumerate(vertices):
             points[index] = point.New(position)
+            _monitor.Increment(1)
 
+        _monitor.Initialize(len(faces))
         for face in faces:
             vertIds = tuple(points[i] for i in face)
             storage = lx.object.storage('p', len(vertIds))
             for index, _id in enumerate(vertIds):
                 storage[index] = _id
             polygon.New(lx.symbol.iPTYP_FACE, storage, len(vertIds), 0)
+            _monitor.Increment(1)
 
         # Add comments from header to the item
         if self.comments:
