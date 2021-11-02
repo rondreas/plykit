@@ -86,6 +86,7 @@ class PLYLoader(lxifc.Loader):
         self.end_header = 0  # final byte of the header,
 
     def load_Cleanup(self):
+        lx.out("Performing load_Cleanup...")
         if self.filehandle:
             self.filehandle.close()
         return lx.result.OK
@@ -102,6 +103,7 @@ class PLYLoader(lxifc.Loader):
 
         """
 
+
         _monitor = lx.object.Monitor(monitor)
 
         # Set position of file at end of header,
@@ -110,9 +112,11 @@ class PLYLoader(lxifc.Loader):
         vertices = []
         faces = []
 
+        lx.out("Parsing properties...")
         if self.format == "ascii":
             for element in self.elements:
                 if element.get('name') == "vertex":
+                    lx.out("Vertex element found...")
                     # For this element, read expected types to list
                     types = []
                     for prop in element.get("properties"):
@@ -121,13 +125,17 @@ class PLYLoader(lxifc.Loader):
                     # Each element is expected to be stored on one line, parse each
                     # line with expected property types.
                     for _ in range(element.get('count', 0)):
-                        data = tuple(t(value) for t, value in zip(types, self.filehandle.readline().strip().split()))
+                        data = tuple(t(value) for t, value in zip(types, str(self.filehandle.readline().decode('ascii')).strip().split()))
                         vertices.append(data[:3]) # push the first three types, assuming here they are position xyz
 
+                    lx.out("Read {} vertices...".format(len(vertices)))
+
                 elif element.get('name') == "face":
+                    lx.out("Face element found...")
                     for _ in range(element.get('count', 0)):
-                        data = self.filehandle.readline().strip().split()
+                        data = str(self.filehandle.readline().decode('ascii').strip()).split()
                         faces.append(tuple(int(d) for d in data[1:]))
+                    lx.out("Read {} faces...".format(len(faces)))
         
         elif self.format == "binary_big_endian":
             chunk_size = 1024
@@ -198,6 +206,7 @@ class PLYLoader(lxifc.Loader):
         else:
             pass
 
+        lx.out("Creating the scene...")
         scene = lx.object.Scene(dest)
 
         item = scene.ItemAdd(
@@ -219,11 +228,13 @@ class PLYLoader(lxifc.Loader):
 
         # vertex should be a tuple for position,
         points = {}
+        lx.out("Generating points...")
         _monitor.Initialize(len(vertices))
         for index, position in enumerate(vertices):
             points[index] = point.New(position)
             _monitor.Increment(1)
 
+        lx.out("Generating polygons from points...")
         _monitor.Initialize(len(faces))
         for face in faces:
             vertIds = tuple(points[i] for i in face)
@@ -235,6 +246,7 @@ class PLYLoader(lxifc.Loader):
 
         # Add comments from header to the item
         if self.comments:
+            lx.out("Adding comments from file to the mesh object...")
             tag = lx.object.StringTag(item)
             tag.Set(lx.symbol.iTAG_COMMENT, "\n".join(self.comments))
 
@@ -252,50 +264,54 @@ class PLYLoader(lxifc.Loader):
         """
 
         self.filehandle = open(filename, "rb")
+        self.elements.clear()
 
         # Early exit if magic number not found,
-        magicnumber = self.filehandle.readline().strip()
-        if magicnumber != b"ply":
+        magicnumber = str(self.filehandle.readline().decode('ascii').strip())
+        if magicnumber != "ply":
+            lx.out("File missing 'ply' in the header...")
             lx.throw(lx.result.NOTFOUND)
 
         # Line after magic number should define the format,
         # not doing full check, only looking for the second value
         # to match the allowed format types
-        _, format, version = self.filehandle.readline().split()
-        if format == b"ascii":
+        _, format, version = str(self.filehandle.readline().decode('ascii')).split()
+        if format == "ascii":
             self.format = "ascii"
-        elif format == b"binary_big_endian":
+        elif format == "binary_big_endian":
             self.format = "binary_big_endian"
-        elif format == b"binary_little_endian":
+        elif format == "binary_little_endian":
             self.format = "binary_little_endian"
         else:
             lx.throw(lx.result.NOTFOUND)
 
+        lx.out("Recognized format as {}".format(self.format))
         element = None  # remember the previously defined element,
 
         # Read rest of the headers, raising lookup error when header
         # couldn't be parsed.
         while self.filehandle:
-            line = self.filehandle.readline().strip()
+            line = str(self.filehandle.readline().decode('ascii').strip())
 
-            if line == b"":
+            if line == "":
                 lx.throw(lx.result.NOTFOUND)
 
-            if line == b"end_header":
+            if line == "end_header":
                 break  # We've reached the end of header,
 
             # Check for comments and read to a list.
-            if line.startswith(b"comment"):
-                self.comments.append(str(line[8:].decode('ascii')))
+            if line.startswith("comment"):
+                self.comments.append(line[8:])
 
             # Parse elements,
-            elif line.startswith(b"element"):
+            elif line.startswith("element"):
                 _, name, count = line.split()
                 element = {"name": name, "count": int(count), "properties": []}
+                lx.out("Counting {} {}".format(count, name))
                 self.elements.append(element)
 
             # Parse properties for elements,
-            elif line.startswith(b"property"):
+            elif line.startswith("property"):
                 fields = line.split()
                 if len(fields) == 3:  # regular 'scalar' property
                     _, datatype, name = fields
