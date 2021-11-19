@@ -39,6 +39,10 @@ import lxifc
 import lxu
 
 
+# Constant tuple with recognized formats for ply files.
+SUPPORTED_FORMATS = ("ascii", "binary_big_endian", "binary_little_endian")
+
+
 # Dictionary to map ply property types to struct types
 binary_property_types = {
     "char": "b",
@@ -69,24 +73,19 @@ class PLYLoader(lxifc.Loader):
         self.scene_service = lx.service.Scene()
         self.load_target = None
 
-        # ply recognized formats include
-        # ( ascii | binary_big_endian | binary_little_endian )
         self.format = None
-
-        self.comments = []  # Store comments as lists of strings
-
-        # List of found elements as dictionaries, with properties stored
-        # [{
-        #   "name": "vertex",
-        #   "count": 8,
-        #   "properties": [{'name': x, "type": "float"}],
-        # }]
+        self.comments = []
         self.elements = []
-
         self.end_header = 0  # final byte of the header,
 
     def load_Cleanup(self):
         lx.out("Performing load_Cleanup...")
+
+        self.format = None
+        self.comments = []
+        self.elements = []
+        self.end_header = 0
+
         if self.filehandle:
             self.filehandle.close()
         return lx.result.OK
@@ -137,13 +136,15 @@ class PLYLoader(lxifc.Loader):
                         faces.append(tuple(int(d) for d in data[1:]))
                     lx.out("Read {} faces...".format(len(faces)))
         
-        elif self.format == "binary_big_endian":
+        else:
             chunk_size = 1024
             for element in self.elements:
                 if element.get('name') == "vertex":
-                    fmt = '>'
+
+                    # Get the struct format
+                    fmt = ">" if self.format == "binary_big_endian" else "<"
                     for prop in element.get("properties"):
-                        fmt += binary_property_types.get(prop.get('type'))
+                        fmt += binary_property_types.get(prop.get("type"))
 
                     size = struct.calcsize(fmt) # each vertex have this size
                     total_size = size * element.get('count', 0) # the total byte size for all vertices
@@ -189,24 +190,11 @@ class PLYLoader(lxifc.Loader):
                         fmt = '>' + str(num_indices) + t
                         size = struct.calcsize(fmt)
                         data = self.filehandle.read(size)
-                        try:
-                            indices = struct.unpack(fmt, data)
-                            faces.append(indices)
-                        except struct.error as e:
-                            print(e)
-                            print("Failed reading {} bytes for format {}".format(size, fmt))
-                            print("Failed @ {}".format(pos))
-                            raise(e)
+                        indices = struct.unpack(fmt, data)
+                        faces.append(indices)
 
                         _monitor.Increment(1)
 
-        elif self.format == "binary_little_endian":
-            pass
-
-        else:
-            pass
-
-        lx.out("Creating the scene...")
         scene = lx.object.Scene(dest)
 
         item = scene.ItemAdd(
@@ -264,7 +252,6 @@ class PLYLoader(lxifc.Loader):
         """
 
         self.filehandle = open(filename, "rb")
-        self.elements.clear()
 
         # Early exit if magic number not found,
         magicnumber = str(self.filehandle.readline().decode('ascii').strip())
@@ -275,14 +262,10 @@ class PLYLoader(lxifc.Loader):
         # Line after magic number should define the format,
         # not doing full check, only looking for the second value
         # to match the allowed format types
-        _, format, version = str(self.filehandle.readline().decode('ascii')).split()
-        if format == "ascii":
-            self.format = "ascii"
-        elif format == "binary_big_endian":
-            self.format = "binary_big_endian"
-        elif format == "binary_little_endian":
-            self.format = "binary_little_endian"
-        else:
+        _, format, version = self.filehandle.readline().split()
+        self.format = format.decode("ascii")
+        if self.format not in SUPPORTED_FORMATS:
+            lx.out("Failed to get file format...")
             lx.throw(lx.result.NOTFOUND)
 
         lx.out("Recognized format as {}".format(self.format))
@@ -291,17 +274,15 @@ class PLYLoader(lxifc.Loader):
         # Read rest of the headers, raising lookup error when header
         # couldn't be parsed.
         while self.filehandle:
-            line = str(self.filehandle.readline().decode('ascii').strip())
-
-            if line == "":
-                lx.throw(lx.result.NOTFOUND)
+            line = str(self.filehandle.readline().decode("ascii").strip())
 
             if line == "end_header":
                 break  # We've reached the end of header,
 
             # Check for comments and read to a list.
-            if line.startswith("comment"):
-                self.comments.append(line[8:])
+            elif line.startswith("comment"):
+                comment = line[8:]
+                self.comments.append(comment)
 
             # Parse elements,
             elif line.startswith("element"):
@@ -317,15 +298,18 @@ class PLYLoader(lxifc.Loader):
                     _, datatype, name = fields
                     element["properties"].append(
                             {"name": name, "type": datatype})
+                    lx.out("Adding property {} to {}".format(name, element.get("name")))
 
                 elif len(fields) == 5:  # list type property
                     _, _, size, datatype, name = fields
                     element["properties"].append(
                             {"name": name, "type": datatype, "size": size})
                 else:
+                    lx.out("Unsupported property found...")
                     lx.throw(lx.result.NOTFOUND)
 
             else:
+                lx.out("Failed for parse: {}".format(line))
                 lx.throw(lx.result.NOTFOUND)
 
         self.end_header = self.filehandle.tell()
@@ -337,7 +321,7 @@ class PLYLoader(lxifc.Loader):
         self.load_target.set(loadInfo)
         self.load_target.SetRootType(lx.symbol.sITYPE_MESH)
 
-        return lx.result.OK  # Tell Modo we've recognized the file.
+        return lx.result.OK  # Explicitly tell Modo we've recognized the file.
 
 
 tags = {
